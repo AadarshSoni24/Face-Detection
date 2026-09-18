@@ -1,0 +1,6 @@
+roll_number,name,image_filename,course
+101,Rahul Kumar,rahul_face.jpg,Computer Science
+102,Priya Sharma,priya_face.jpg,Information Technology
+103,Amit Verma,no_face.jpg,Electronics
+104,Sneha Patel,multi_face.jpg,Mechanical
+105,Vikram Singh,corrupt_image.jpg,Civil
