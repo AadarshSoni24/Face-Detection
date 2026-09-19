@@ -2,25 +2,30 @@
 ui/authentication.py - Exam Day Student Authentication Screen.
 
 Verifies student identity by matching live webcam face against registered 128-d
-biometric embeddings. If verified: marks attendance and grants exam access.
-If mismatch: denies access and prevents attendance.
+biometric embeddings, evaluates anti-spoofing liveness, logs audit records,
+marks attendance, and issues official verified digital examination passes.
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict, List
+import webbrowser
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
 import logging
+import os
 import config
 from database.db import Database
 from camera.camera_manager import CameraManager, CameraUnavailableError
 from recognition.face_detector import FaceDetector
 from recognition.face_encoder import FaceEncoder
 from recognition.face_matcher import FaceMatcher
+from recognition.liveness_detector import LivenessDetector
+from recognition.quality_analyzer import QualityAnalyzer
 from services.authentication_service import AuthenticationService, AuthenticationResult
 from services.attendance_service import AttendanceService
+from services.pass_generator import PassGenerator, ExamPass
 from ui.styles import (
     FONT_TITLE, FONT_SUBHEADER, FONT_BODY, FONT_SMALL,
     FONT_HEADER, FONT_BODY_BOLD, FONT_VERDICT
@@ -30,7 +35,7 @@ logger = logging.getLogger("ExamAuth.AuthenticationUI")
 
 
 class AuthenticationView(ttk.Frame):
-    """Exam Day Authentication Screen with prominent result card."""
+    """Exam Day Authentication Screen with prominent result card and liveness validation."""
 
     def __init__(
         self,
@@ -50,19 +55,27 @@ class AuthenticationView(ttk.Frame):
         self.matcher = matcher
         self.navigate = navigate_callback
 
+        self.liveness_detector = LivenessDetector()
+        self.quality_analyzer = QualityAnalyzer()
+        self.pass_generator = PassGenerator()
         self.attendance_service = AttendanceService(db=self.db)
         self.auth_service = AuthenticationService(
             db=self.db,
             detector=self.detector,
             encoder=self.encoder,
             matcher=self.matcher,
-            attendance_service=self.attendance_service
+            attendance_service=self.attendance_service,
+            liveness_detector=self.liveness_detector,
+            quality_analyzer=self.quality_analyzer,
+            pass_generator=self.pass_generator
         )
 
         self._feed_active = False
         self._poll_job: Optional[str] = None
         self._current_raw_frame: Optional[np.ndarray] = None
         self._photo_image: Optional[ImageTk.PhotoImage] = None
+        self._last_result: Optional[AuthenticationResult] = None
+        self._pass_preview_img: Optional[ImageTk.PhotoImage] = None
 
         self._build_ui()
 
@@ -100,12 +113,12 @@ class AuthenticationView(ttk.Frame):
 
         # Main Layout: 2 Columns (Left: Input & Result Card, Right: Live Camera)
         main_box = tk.Frame(self, bg=config.COLOR_BG)
-        main_box.pack(fill="both", expand=True, padx=24, pady=20)
+        main_box.pack(fill="both", expand=True, padx=24, pady=16)
 
-        # Left Column: Roll Number Entry & Verdict Card (Width ~420)
+        # Left Column: Roll Number Entry & Verdict Card (Width ~430)
         left_panel = tk.Frame(main_box, bg=config.COLOR_CARD_BG, bd=1, relief="solid", highlightthickness=0)
         left_panel.config(highlightbackground=config.COLOR_BORDER)
-        left_panel.pack(side="left", fill="both", padx=(0, 16), ipadx=16, ipady=16)
+        left_panel.pack(side="left", fill="both", padx=(0, 16), ipadx=14, ipady=12)
 
         tk.Label(
             left_panel,
@@ -113,21 +126,30 @@ class AuthenticationView(ttk.Frame):
             font=FONT_SUBHEADER,
             fg=config.COLOR_TEXT_PRIMARY,
             bg=config.COLOR_CARD_BG
-        ).pack(anchor="w", padx=16, pady=(16, 12))
+        ).pack(anchor="w", padx=14, pady=(10, 6))
 
-        # Roll Number Input Field (Optional for 1:1 Verification, or leave empty for Auto-Identify)
+        # Active Exam Session Selector
+        session_box = tk.Frame(left_panel, bg=config.COLOR_CARD_BG)
+        session_box.pack(fill="x", padx=14, pady=(0, 6))
+
+        tk.Label(session_box, text="Exam Session:", font=FONT_SMALL, fg=config.COLOR_TEXT_MUTED, bg=config.COLOR_CARD_BG).pack(side="left")
+        self.combo_session = ttk.Combobox(session_box, state="readonly", width=30)
+        self.combo_session.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        self._populate_sessions()
+
+        # Roll Number Input Field
         tk.Label(
             left_panel,
-            text="Roll Number (Optional — or leave blank to Auto-Identify):",
+            text="Roll Number (Optional — or blank for Auto-Identify):",
             font=FONT_BODY_BOLD,
             fg=config.COLOR_TEXT_PRIMARY,
             bg=config.COLOR_CARD_BG
-        ).pack(anchor="w", padx=16, pady=(4, 2))
+        ).pack(anchor="w", padx=14, pady=(2, 2))
 
         input_row = tk.Frame(left_panel, bg=config.COLOR_CARD_BG)
-        input_row.pack(fill="x", padx=16, pady=(0, 8))
+        input_row.pack(fill="x", padx=14, pady=(0, 6))
 
-        self.entry_roll = ttk.Entry(input_row, style="App.TEntry", font=(FONT_BODY[0], 12))
+        self.entry_roll = ttk.Entry(input_row, style="App.TEntry", font=(FONT_BODY[0], 11))
         self.entry_roll.pack(side="left", fill="x", expand=True)
         self.entry_roll.bind("<Return>", lambda e: self._on_verify_clicked())
 
@@ -136,11 +158,11 @@ class AuthenticationView(ttk.Frame):
             text="Verify Face 🎯",
             style="Primary.TButton",
             command=self._on_verify_clicked
-        ).pack(side="right", padx=(8, 0))
+        ).pack(side="right", padx=(6, 0))
 
         # Auto-Identify Button Row
         auto_row = tk.Frame(left_panel, bg=config.COLOR_CARD_BG)
-        auto_row.pack(fill="x", padx=16, pady=(0, 12))
+        auto_row.pack(fill="x", padx=14, pady=(0, 8))
 
         ttk.Button(
             auto_row,
@@ -149,12 +171,29 @@ class AuthenticationView(ttk.Frame):
             command=self._on_auto_identify_clicked
         ).pack(fill="x")
 
-        # Camera & Source Control Buttons
-        cam_ctrl_row = tk.Frame(left_panel, bg=config.COLOR_CARD_BG)
-        cam_ctrl_row.pack(fill="x", padx=16, pady=(0, 16))
+        # Anti-Spoofing Liveness Toggle & Camera Controls
+        ctrl_bar = tk.Frame(left_panel, bg=config.COLOR_CARD_BG)
+        ctrl_bar.pack(fill="x", padx=14, pady=(0, 8))
+
+        self.var_liveness = tk.BooleanVar(value=config.LIVENESS_CHECK_ENABLED_DEFAULT)
+        self.chk_liveness = ttk.Checkbutton(
+            ctrl_bar,
+            text="🛡️ Anti-Spoofing Liveness Check",
+            variable=self.var_liveness
+        )
+        self.chk_liveness.pack(side="left")
+
+        # Camera selector
+        self.combo_cam = ttk.Combobox(ctrl_bar, values=["Camera 0", "Camera 1", "Camera 2"], state="readonly", width=9)
+        self.combo_cam.set(f"Camera {config.DEFAULT_CAMERA_INDEX}")
+        self.combo_cam.pack(side="right")
+        self.combo_cam.bind("<<ComboboxSelected>>", self._on_camera_selected)
+
+        cam_btn_row = tk.Frame(left_panel, bg=config.COLOR_CARD_BG)
+        cam_btn_row.pack(fill="x", padx=14, pady=(0, 10))
 
         self.btn_toggle_cam = ttk.Button(
-            cam_ctrl_row,
+            cam_btn_row,
             text="▶ Start Camera",
             style="Secondary.TButton",
             command=self._toggle_camera
@@ -162,13 +201,13 @@ class AuthenticationView(ttk.Frame):
         self.btn_toggle_cam.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         ttk.Button(
-            cam_ctrl_row,
+            cam_btn_row,
             text="📁 Test Photo...",
             style="Secondary.TButton",
             command=self._browse_test_photo
         ).pack(side="right", fill="x", expand=True, padx=(4, 0))
 
-        ttk.Separator(left_panel, orient="horizontal").pack(fill="x", padx=16, pady=(0, 12))
+        ttk.Separator(left_panel, orient="horizontal").pack(fill="x", padx=14, pady=(0, 8))
 
         # -----------------------------------------------------------------
         # Verdict Result Card
@@ -179,7 +218,7 @@ class AuthenticationView(ttk.Frame):
             font=FONT_SUBHEADER,
             fg=config.COLOR_TEXT_PRIMARY,
             bg=config.COLOR_CARD_BG
-        ).pack(anchor="w", padx=16, pady=(0, 8))
+        ).pack(anchor="w", padx=14, pady=(0, 6))
 
         self.card_result = tk.Frame(
             left_panel,
@@ -189,9 +228,9 @@ class AuthenticationView(ttk.Frame):
             highlightthickness=0
         )
         self.card_result.config(highlightbackground="#CBD5E1")
-        self.card_result.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self.card_result.pack(fill="both", expand=True, padx=14, pady=(0, 12))
 
-        self.card_inner = tk.Frame(self.card_result, bg="#F8FAFC", padx=16, pady=16)
+        self.card_inner = tk.Frame(self.card_result, bg="#F8FAFC", padx=14, pady=12)
         self.card_inner.pack(fill="both", expand=True)
 
         self.lbl_verdict_title = tk.Label(
@@ -201,7 +240,7 @@ class AuthenticationView(ttk.Frame):
             fg=config.COLOR_TEXT_MUTED,
             bg="#F8FAFC"
         )
-        self.lbl_verdict_title.pack(anchor="w", pady=(0, 12))
+        self.lbl_verdict_title.pack(anchor="w", pady=(0, 8))
 
         # Detailed Key-Value Rows
         self.lbl_student_info = tk.Label(
@@ -212,9 +251,9 @@ class AuthenticationView(ttk.Frame):
             bg="#F8FAFC",
             justify="left"
         )
-        self.lbl_student_info.pack(anchor="w", pady=4)
+        self.lbl_student_info.pack(anchor="w", pady=2)
 
-        ttk.Separator(self.card_inner, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Separator(self.card_inner, orient="horizontal").pack(fill="x", pady=6)
 
         self.lbl_match_status = tk.Label(
             self.card_inner,
@@ -223,7 +262,16 @@ class AuthenticationView(ttk.Frame):
             fg=config.COLOR_TEXT_MUTED,
             bg="#F8FAFC"
         )
-        self.lbl_match_status.pack(anchor="w", pady=2)
+        self.lbl_match_status.pack(anchor="w", pady=1)
+
+        self.lbl_liveness_status = tk.Label(
+            self.card_inner,
+            text="Liveness: —",
+            font=FONT_BODY,
+            fg=config.COLOR_TEXT_MUTED,
+            bg="#F8FAFC"
+        )
+        self.lbl_liveness_status.pack(anchor="w", pady=1)
 
         self.lbl_attendance_status = tk.Label(
             self.card_inner,
@@ -232,7 +280,7 @@ class AuthenticationView(ttk.Frame):
             fg=config.COLOR_TEXT_MUTED,
             bg="#F8FAFC"
         )
-        self.lbl_attendance_status.pack(anchor="w", pady=2)
+        self.lbl_attendance_status.pack(anchor="w", pady=1)
 
         self.lbl_access_status = tk.Label(
             self.card_inner,
@@ -241,24 +289,36 @@ class AuthenticationView(ttk.Frame):
             fg=config.COLOR_TEXT_MUTED,
             bg="#F8FAFC"
         )
-        self.lbl_access_status.pack(anchor="w", pady=2)
+        self.lbl_access_status.pack(anchor="w", pady=1)
 
         self.lbl_score_detail = tk.Label(
             self.card_inner,
             text="Similarity Score: —",
             font=FONT_SMALL,
             fg=config.COLOR_TEXT_MUTED,
-            bg="#F8FAFC"
+            bg="#F8FAFC",
+            justify="left"
         )
-        self.lbl_score_detail.pack(anchor="w", pady=(8, 0))
+        self.lbl_score_detail.pack(anchor="w", pady=(4, 0))
 
-        # Direct shortcut button to view attendance table
+        # Buttons on successful verification: View Pass & View Attendance
+        self.btn_box_verdict = tk.Frame(self.card_inner, bg="#F8FAFC")
+
+        self.btn_view_pass = ttk.Button(
+            self.btn_box_verdict,
+            text="🎫 View / Print Exam Pass",
+            style="Success.TButton",
+            command=self._on_show_exam_pass_modal
+        )
+        self.btn_view_pass.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
         self.btn_view_attendance = ttk.Button(
-            self.card_inner,
-            text="📋 View Attendance Records",
+            self.btn_box_verdict,
+            text="📋 Attendance Log",
             style="Primary.TButton",
             command=self._on_view_attendance_clicked
         )
+        self.btn_view_attendance.pack(side="right", fill="x", expand=True, padx=(4, 0))
 
         # Right Column: Live Camera Feed
         right_panel = tk.Frame(main_box, bg=config.COLOR_CARD_BG, bd=1, relief="solid")
@@ -270,14 +330,29 @@ class AuthenticationView(ttk.Frame):
 
         tk.Label(
             preview_header,
-            text="Live Face Capture & Recognition Tracking",
+            text="Live Face Capture, Quality & Liveness Tracking",
             font=FONT_SUBHEADER,
             fg=config.COLOR_TEXT_PRIMARY,
             bg=config.COLOR_CARD_BG
         ).pack(side="left")
 
+        # Badges (Quality + Detection)
+        badges_f = tk.Frame(preview_header, bg=config.COLOR_CARD_BG)
+        badges_f.pack(side="right")
+
+        self.lbl_quality_badge = tk.Label(
+            badges_f,
+            text="Quality: Awaiting",
+            font=FONT_SMALL,
+            fg="#64748B",
+            bg="#E2E8F0",
+            padx=8,
+            pady=2
+        )
+        self.lbl_quality_badge.pack(side="left", padx=(0, 8))
+
         self.lbl_detection_badge = tk.Label(
-            preview_header,
+            badges_f,
             text="Camera Inactive",
             font=FONT_SMALL,
             fg="#64748B",
@@ -285,7 +360,7 @@ class AuthenticationView(ttk.Frame):
             padx=8,
             pady=2
         )
-        self.lbl_detection_badge.pack(side="right")
+        self.lbl_detection_badge.pack(side="left")
 
         self.canvas_cam = tk.Canvas(
             right_panel,
@@ -305,9 +380,30 @@ class AuthenticationView(ttk.Frame):
             tags="placeholder"
         )
 
+    def _populate_sessions(self) -> None:
+        """Fetch active sessions into combobox."""
+        sessions = self.db.get_active_sessions()
+        self._session_map: Dict[str, int] = {}
+        values = ["None (Default Session)"]
+
+        for s in sessions:
+            label = f"{s['session_code']} - {s['exam_title']} ({s['hall_number']})"
+            values.append(label)
+            self._session_map[label] = s["id"]
+
+        self.combo_session["values"] = values
+        self.combo_session.set(values[0])
+
+    def _get_selected_session_id(self) -> Optional[int]:
+        """Resolve selected session ID."""
+        val = self.combo_session.get()
+        return self._session_map.get(val)
+
     def on_show(self) -> None:
         """Invoked when navigating to this screen."""
         self._reset_verdict()
+        self._populate_sessions()
+        self.liveness_detector.reset()
         self.entry_roll.focus()
         self._start_camera_stream()
 
@@ -319,6 +415,17 @@ class AuthenticationView(ttk.Frame):
         """Navigate back to dashboard."""
         self._stop_camera_stream()
         self.navigate("dashboard")
+
+    def _on_camera_selected(self, event=None) -> None:
+        """Handle camera dropdown index change."""
+        sel = self.combo_cam.get()
+        idx = int(sel.split()[-1])
+        if self._feed_active:
+            self._stop_camera_stream()
+            self.camera_manager.switch_camera(idx)
+            self._start_camera_stream()
+        else:
+            self.camera_manager.camera_index = idx
 
     def _start_camera_stream(self, show_error_dialog: bool = False) -> None:
         """Start hardware webcam capture."""
@@ -349,10 +456,6 @@ class AuthenticationView(ttk.Frame):
                 messagebox.showinfo(
                     "Camera Unavailable",
                     "Camera could not be accessed.\n\n"
-                    "Possible causes on your laptop:\n"
-                    "1. Physical camera privacy slider is closed.\n"
-                    "2. Keyboard webcam toggle key (e.g. Fn + F10 or F6) is off.\n"
-                    "3. Windows Settings > Privacy & security > Camera access is disabled.\n\n"
                     "Tip: You can click '📁 Test Photo...' right now to test verification using your face photograph!",
                     parent=self
                 )
@@ -404,7 +507,7 @@ class AuthenticationView(ttk.Frame):
             messagebox.showerror("Image Error", f"Could not load image: {e}", parent=self)
 
     def _poll_frame(self) -> None:
-        """Poll frame from camera manager and render bounding box overlay."""
+        """Poll frame, evaluate live quality and liveness buffer, render overlay."""
         if not self._feed_active:
             return
 
@@ -418,18 +521,32 @@ class AuthenticationView(ttk.Frame):
 
             if face_count == 0:
                 self.lbl_detection_badge.config(text="No Face Detected", fg="#D97706", bg="#FEF3C7")
+                self.lbl_quality_badge.config(text="Awaiting Face", fg="#64748B", bg="#E2E8F0")
             elif face_count == 1:
+                target_f = faces[0]
                 self.lbl_detection_badge.config(
-                    text=f"1 Face Detected ({faces[0].confidence*100:.1f}%)",
+                    text=f"1 Face ({target_f.confidence*100:.1f}%)",
                     fg="#059669",
                     bg="#D1FAE5"
                 )
+                # Live quality check
+                q = self.quality_analyzer.evaluate_frame(frame, face_bbox=(target_f.x, target_f.y, target_f.w, target_f.h))
+                self.lbl_quality_badge.config(
+                    text=q.message,
+                    fg=q.badge_color,
+                    bg="#ECFDF5" if q.is_acceptable else "#FEF3C7"
+                )
+
+                # Feed liveness buffer continuously
+                if self.var_liveness.get():
+                    self.liveness_detector.update(frame, target_f)
             else:
                 self.lbl_detection_badge.config(
                     text=f"⚠️ {face_count} Faces Detected",
                     fg="#DC2626",
                     bg="#FEE2E2"
                 )
+                self.lbl_quality_badge.config(text="Multiple Faces", fg="#DC2626", bg="#FEE2E2")
 
             # Draw visual landmarks on frame
             annotated_frame = self.detector.draw_faces(frame, faces)
@@ -465,26 +582,29 @@ class AuthenticationView(ttk.Frame):
             )
             return
 
+        session_id = self._get_selected_session_id()
+        check_live = self.var_liveness.get()
+
         result: AuthenticationResult = self.auth_service.identify_face(
-            frame_bgr=self._current_raw_frame
+            frame_bgr=self._current_raw_frame,
+            session_id=session_id,
+            check_liveness=check_live
         )
 
         if result.success and result.roll_number:
-            # Automatically populate the Roll Number entry box!
             self.entry_roll.delete(0, "end")
             self.entry_roll.insert(0, result.roll_number)
 
+        self._last_result = result
         self._display_verdict(result)
 
     def _on_verify_clicked(self) -> None:
         """
         Execute authentication verification.
-        If a roll number is entered, verifies 1:1 against that student.
-        If the roll number box is left blank, automatically auto-identifies by face!
+        If roll number is provided: 1:1 match. If blank: auto-identify.
         """
         roll = self.entry_roll.get().strip()
         if not roll:
-            # Seamless fallback: no roll number typed -> auto-identify by face!
             self._on_auto_identify_clicked()
             return
 
@@ -496,12 +616,17 @@ class AuthenticationView(ttk.Frame):
             )
             return
 
-        # Execute 1:1 verification against entered roll number
+        session_id = self._get_selected_session_id()
+        check_live = self.var_liveness.get()
+
         result: AuthenticationResult = self.auth_service.authenticate(
             roll_number=roll,
-            frame_bgr=self._current_raw_frame
+            frame_bgr=self._current_raw_frame,
+            session_id=session_id,
+            check_liveness=check_live
         )
 
+        self._last_result = result
         self._display_verdict(result)
 
     def _display_verdict(self, result: AuthenticationResult) -> None:
@@ -521,7 +646,7 @@ class AuthenticationView(ttk.Frame):
                 bg=bg_color
             )
             self.lbl_student_info.config(
-                text=f"Student: {result.student_name}\nRoll Number: {result.roll_number}",
+                text=f"Candidate: {result.student_name}\nRoll Number: {result.roll_number}",
                 fg=config.COLOR_TEXT_PRIMARY,
                 bg=bg_color
             )
@@ -529,6 +654,13 @@ class AuthenticationView(ttk.Frame):
                 text=f"Face Match: {result.face_match_status}",
                 fg=text_color,
                 font=FONT_BODY_BOLD,
+                bg=bg_color
+            )
+            live_text = f"Liveness: {result.liveness_status or 'VERIFIED'} (Score: {result.liveness_score:.2f})" if result.liveness_score is not None else "Liveness: VERIFIED"
+            self.lbl_liveness_status.config(
+                text=live_text,
+                fg=text_color,
+                font=FONT_BODY,
                 bg=bg_color
             )
             att_display = (
@@ -548,16 +680,18 @@ class AuthenticationView(ttk.Frame):
                 font=(FONT_BODY[0], 12, "bold"),
                 bg=bg_color
             )
-            if result.similarity_score is not None and result.threshold is not None:
-                self.lbl_score_detail.config(
-                    text=f"Cosine Similarity: {result.similarity_score:.3f} (Threshold: {result.threshold:.3f})",
-                    fg=config.COLOR_TEXT_MUTED,
-                    bg=bg_color
-                )
-            # Display prominent button taking user directly to the Attendance Log
-            self.btn_view_attendance.pack(anchor="w", pady=(12, 0), fill="x")
+            score_txt = f"Cosine Similarity: {result.similarity_score:.3f} (Threshold: {result.threshold:.3f})" if result.similarity_score is not None else ""
+            if result.exam_pass:
+                score_txt += f"\nPass Token: {result.exam_pass.pass_code}"
+            self.lbl_score_detail.config(
+                text=score_txt,
+                fg=config.COLOR_TEXT_MUTED,
+                bg=bg_color
+            )
+            self.btn_box_verdict.config(bg=bg_color)
+            self.btn_box_verdict.pack(anchor="w", pady=(10, 0), fill="x")
         else:
-            self.btn_view_attendance.pack_forget()
+            self.btn_box_verdict.pack_forget()
             # AUTHENTICATION FAILED (Red Theme)
             bg_color = config.COLOR_DANGER_BG
             border_color = config.COLOR_DANGER
@@ -566,8 +700,9 @@ class AuthenticationView(ttk.Frame):
             self.card_result.config(bg=bg_color, highlightbackground=border_color)
             self.card_inner.config(bg=bg_color)
 
+            title_text = "⚠️ " + result.status_title if "SPOOF" in result.status_title else "✗ AUTHENTICATION FAILED"
             self.lbl_verdict_title.config(
-                text="✗ AUTHENTICATION FAILED",
+                text=title_text,
                 fg=text_color,
                 bg=bg_color
             )
@@ -580,6 +715,13 @@ class AuthenticationView(ttk.Frame):
                 text=f"Face Match: {result.face_match_status}",
                 fg=text_color,
                 font=FONT_BODY_BOLD,
+                bg=bg_color
+            )
+            live_text = f"Liveness: {result.liveness_status or 'FAILED'}" + (f" ({result.liveness_score:.2f})" if result.liveness_score is not None else "")
+            self.lbl_liveness_status.config(
+                text=live_text,
+                fg=text_color,
+                font=FONT_BODY,
                 bg=bg_color
             )
             self.lbl_attendance_status.config(
@@ -606,15 +748,100 @@ class AuthenticationView(ttk.Frame):
 
     def _reset_verdict(self) -> None:
         """Reset verdict card to default neutral state."""
-        self.btn_view_attendance.pack_forget()
+        self.btn_box_verdict.pack_forget()
         self.card_result.config(bg="#F8FAFC", highlightbackground="#CBD5E1")
         self.card_inner.config(bg="#F8FAFC")
         self.lbl_verdict_title.config(text="AWAITING VERIFICATION", fg=config.COLOR_TEXT_MUTED, bg="#F8FAFC")
         self.lbl_student_info.config(text="Student: —\nRoll Number: —", fg=config.COLOR_TEXT_PRIMARY, bg="#F8FAFC")
         self.lbl_match_status.config(text="Face Match: —", fg=config.COLOR_TEXT_MUTED, font=FONT_BODY, bg="#F8FAFC")
+        self.lbl_liveness_status.config(text="Liveness: —", fg=config.COLOR_TEXT_MUTED, font=FONT_BODY, bg="#F8FAFC")
         self.lbl_attendance_status.config(text="Attendance: —", fg=config.COLOR_TEXT_MUTED, font=FONT_BODY, bg="#F8FAFC")
         self.lbl_access_status.config(text="Exam Access: —", fg=config.COLOR_TEXT_MUTED, font=FONT_BODY_BOLD, bg="#F8FAFC")
         self.lbl_score_detail.config(text="Similarity Score: —", fg=config.COLOR_TEXT_MUTED, bg="#F8FAFC")
+
+    def _on_show_exam_pass_modal(self) -> None:
+        """Open popup window displaying the generated official exam pass."""
+        if not self._last_result or not self._last_result.exam_pass:
+            messagebox.showinfo("No Pass", "No exam pass is currently available.", parent=self)
+            return
+
+        exam_pass: ExamPass = self._last_result.exam_pass
+
+        # Modal Window
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Official Exam Entry Pass — {exam_pass.roll_number}")
+        dlg.geometry("740x560")
+        dlg.minsize(700, 520)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=config.COLOR_HEADER_BG, height=50)
+        hdr.pack(fill="x", side="top")
+        hdr.pack_propagate(False)
+
+        tk.Label(
+            hdr,
+            text=f"Verified Exam Entry Pass ({exam_pass.pass_code})",
+            font=FONT_HEADER,
+            fg="#FFFFFF",
+            bg=config.COLOR_HEADER_BG
+        ).pack(side="left", padx=20, pady=12)
+
+        body = tk.Frame(dlg, bg=config.COLOR_BG, padx=20, pady=16)
+        body.pack(fill="both", expand=True)
+
+        # Render pass image
+        if exam_pass.pil_image:
+            pil_thumb = exam_pass.pil_image.copy()
+            pil_thumb.thumbnail((680, 400), Image.Resampling.LANCZOS)
+            self._pass_preview_img = ImageTk.PhotoImage(pil_thumb)
+
+            canvas_pass = tk.Canvas(body, width=pil_thumb.width, height=pil_thumb.height, bg=config.COLOR_BG, highlightthickness=0)
+            canvas_pass.pack(pady=(0, 14))
+            canvas_pass.create_image(0, 0, anchor="nw", image=self._pass_preview_img)
+
+        btn_row = tk.Frame(body, bg=config.COLOR_BG)
+        btn_row.pack(fill="x", pady=4)
+
+        ttk.Button(
+            btn_row,
+            text="🖨️ Open Printable HTML Receipt",
+            style="Primary.TButton",
+            command=lambda: self._open_html_pass(exam_pass)
+        ).pack(side="left", padx=(0, 8))
+
+        if exam_pass.image_path:
+            ttk.Button(
+                btn_row,
+                text="💾 Save Pass Image...",
+                style="Secondary.TButton",
+                command=lambda: self._save_pass_image(exam_pass)
+            ).pack(side="left", padx=4)
+
+        ttk.Button(btn_row, text="Close", style="Secondary.TButton", command=dlg.destroy).pack(side="right")
+
+    def _open_html_pass(self, exam_pass: ExamPass) -> None:
+        """Generate and launch printable HTML in user's default browser."""
+        try:
+            html_path = self.pass_generator.generate_html_receipt(exam_pass)
+            webbrowser.open(f"file:///{os.path.abspath(html_path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open pass receipt: {e}", parent=self)
+
+    def _save_pass_image(self, exam_pass: ExamPass) -> None:
+        """Save pass image to custom user path."""
+        if not exam_pass.pil_image:
+            return
+        save_path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save Exam Entry Pass Image",
+            initialfile=f"exam_pass_{exam_pass.roll_number}.png",
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")]
+        )
+        if save_path:
+            exam_pass.pil_image.save(save_path, "PNG")
+            messagebox.showinfo("Saved", f"Pass saved to:\n\n{save_path}", parent=self)
 
     def _on_view_attendance_clicked(self) -> None:
         """Navigate directly to the Attendance Records screen."""

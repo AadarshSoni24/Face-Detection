@@ -83,6 +83,25 @@ COLOR_WARNING = "#D97706"     # Amber 600
 COLOR_WARNING_BG = "#FFFBEB"  # Amber 50
 COLOR_BORDER = "#E2E8F0"      # Slate 200
 
+# Anti-Spoofing & Liveness Detection Parameters
+LIVENESS_CHECK_ENABLED_DEFAULT = True  # Whether liveness mode is toggled on by default
+LIVENESS_THRESHOLD = 0.60              # Overall liveness confidence threshold [0.0 - 1.0]
+LIVENESS_EAR_THRESHOLD = 0.21          # Eye Aspect Ratio threshold below which eye is considered closed/blinking
+LIVENESS_BUFFER_SIZE = 20              # Sliding window of frame landmarks to evaluate temporal motion
+LIVENESS_MIN_FRAMES_REQUIRED = 8       # Minimum frames needed to evaluate motion before verdict
+LIVENESS_MICRO_MOTION_MIN = 0.003      # Minimum variance in normalized facial landmarks for live 3D face
+
+# Image Quality Assessment Parameters
+QUALITY_MIN_BRIGHTNESS = 45.0          # Minimum mean pixel intensity (avoid too dark)
+QUALITY_MAX_BRIGHTNESS = 220.0         # Maximum mean pixel intensity (avoid washed out)
+QUALITY_MIN_SHARPNESS = 40.0           # Minimum Laplacian variance for sharp focus
+QUALITY_MIN_FACE_AREA_RATIO = 0.03     # Face bounding box must cover >= 3% of frame area
+QUALITY_MAX_FACE_AREA_RATIO = 0.70     # Face bounding box must cover <= 70% of frame area
+
+# Exam Session Defaults
+DEFAULT_EXAM_HALL = "Hall 101 (Main Auditorium)"
+DEFAULT_INSTITUTION_NAME = "Central University Examination Board"
+
 # Logging Configuration
 LOG_FILE = str(LOGS_DIR / "exam_auth.log")
 logging.basicConfig(
@@ -97,7 +116,7 @@ logger = logging.getLogger("ExamAuth")
 
 # Academic & Security Notice
 LIVENESS_DISCLAIMER = (
-    "NOTICE: The current academic prototype performs facial recognition using deep learning "
-    "embeddings (YuNet + SFace) but does not provide full liveness/anti-spoofing protection against "
-    "high-resolution photo or video replay attacks. Production deployments require active/passive liveness."
+    "NOTICE: The system includes active landmark-based micro-motion & blink liveness analysis. "
+    "For maximum security against 3D masks and IR spoofs, dedicated multi-spectral hardware cameras are recommended in production."
 )
+

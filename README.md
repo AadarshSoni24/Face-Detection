@@ -30,27 +30,35 @@ This project implements an automated, desktop biometric verification system:
 - **Strict Separation of Face Detection and Face Recognition**:
   - Face Detection uses `YuNet` (ONNX deep neural network) locating face bounding boxes and 5 facial landmarks (eyes, nose tip, mouth corners).
   - Face Recognition uses `SFace` (ONNX deep neural network) extracting 128-dimensional L2-normalized feature embeddings.
-- **Webcam-Based Manual Registration**:
-  - Live preview with real-time face tracking and landmark visualization.
-  - Automated validation ensuring exactly one face is visible before enrollment.
+- **Interactive Anti-Spoofing & Liveness Detection**:
+  - Temporal landmark micro-motion analysis to prevent 2D static printed photo attacks and digital screen replays.
+  - Eye Aspect Ratio (EAR) blink tracking dynamics across sliding frame window.
+  - Texture / Laplacian frequency analysis for screen moiré artifact detection.
+- **Exam Session Management & Hall Seating Allocation**:
+  - Create and schedule examination sessions (Course code, Exam title, Hall/Room Number, Date, Time Window).
+  - Session-wise attendance filtering and export to CSV.
+- **Verified Digital Exam Entry Pass (Hall Ticket Receipt)**:
+  - Instant generation of an official digital examination verification pass upon successful biometric verification.
+  - Embeds candidate photo thumbnail, hall number, verified timestamp, cryptographic security token, and status watermark.
+  - Exportable as high-res PNG image or printable HTML receipt with one click.
+- **Real-Time Face Quality & Illumination Guidance**:
+  - Real-time Laplacian variance sharpness and pixel intensity illumination checks.
+  - Live visual feedback pills on camera feed (*"✓ Optimal Lighting & Focus"*, *"⚠️ Low Lighting"*, *"⚠️ Blurry"*, *"⚠️ Too Far"*).
+- **Webcam-Based Manual Registration & Multi-Camera Switcher**:
+  - Dynamic device index dropdown (Camera 0, Camera 1, Camera 2, Virtual File Mode).
+  - 2-step enrollment workflow with validated face capture snapshot preview.
 - **Exam Day Verification & Auto-Identification**:
-  - **1:N Automatic Identification**: Scan live face directly without typing a roll number; the system recognizes the student across the database, automatically fills their Roll Number, marks attendance, and grants exam access!
+  - **1:N Automatic Identification**: Scan live face directly without typing a roll number; the system recognizes the student across the database, automatically fills their Roll Number, marks attendance, issues an exam pass, and grants access!
   - **1:1 Claimed Identity Verification**: Optional manual roll-number entry with direct 1:1 facial biometric matching.
-  - Distinct verdict panels (Emerald Green for Granted, Red for Denied) with real-time similarity scores.
-- **Automated Attendance Marking with Duplicate Prevention**:
-  - Marks attendance only upon successful biometric verification.
-  - SQLite unique constraint prevents duplicate marking for the same student on the same exam date/session.
+  - Distinct verdict panels (Emerald Green for Granted, Red for Denied) with real-time similarity and liveness scores.
+- **Security & Forensic Audit Logs Inspector**:
+  - Complete security log of all authentication attempts with filterable results (`SUCCESS`, `FAILED`, `SPOOF_ATTEMPT`, `MULTI_FACE`, `NO_FACE`).
+  - Export audit logs to CSV for examination integrity reporting.
 - **Bulk Student Photo & CSV Import**:
-  - Batch processes legacy college photo exports (`.jpg`, `.jpeg`, `.png`, `.webp`).
-  - Supports CSV mapping (`roll_number,name,image_filename,course`).
-  - Validates image integrity, flags corrupt files as **Failed**, and moves ambiguous files, zero-face, or multi-face images into a **Manual Review Required** list without guessing identities.
-  - Supports multiple approved reference facial embeddings per student.
-- **Student & Attendance Management**:
-  - Searchable student roster with deletion confirmation.
-  - Audit logs for all authentication attempts (successes, failures, timestamps, similarity scores).
-  - Attendance table with date filtering and search.
-- **Dashboard Analytics**:
-  - Real-time counters: Total Registered Students, Present Today, and Failed Attempts Today.
+  - Batch processes legacy college photo exports with CSV mapping.
+  - Validates image integrity, flags corrupt files as **Failed**, and moves ambiguous zero-face or multi-face images into a **Manual Review Required** list.
+- **Student Profile & Biometric History Modal**:
+  - Detailed student profile viewer displaying enrollment metadata and table of verified examination attendances.
 
 ---
 
@@ -70,34 +78,40 @@ exam_authentication/
 │
 ├── database/
 │   ├── db.py                       # Connection manager & parameterized CRUD operations
-│   └── schema.py                   # SQLite DDL schema (students, attendance, logs)
+│   └── schema.py                   # SQLite DDL schema (students, attendance, sessions, logs)
 │
 ├── recognition/
 │   ├── face_detector.py            # YuNet detector wrapper with landmark extraction
 │   ├── face_encoder.py             # SFace encoder with 5-point affine alignment (alignCrop)
 │   ├── face_matcher.py             # Cosine similarity matcher & threshold evaluation
+│   ├── liveness_detector.py        # Temporal micro-motion & blink anti-spoofing engine
+│   ├── quality_analyzer.py         # Real-time illumination, focus sharpness, and pose checker
 │   └── model_utils.py              # Automatic model downloader utility
 │
 ├── camera/
-│   └── camera_manager.py           # Thread-safe OpenCV capture with virtual camera mode
+│   └── camera_manager.py           # Thread-safe OpenCV capture with multi-camera discovery
 │
 ├── services/
 │   ├── registration_service.py     # Enrollment business logic & face validation
-│   ├── authentication_service.py   # Verification decision pipeline & access control
+│   ├── authentication_service.py   # Verification decision pipeline & liveness access control
 │   ├── attendance_service.py       # Attendance recording with duplicate prevention
+│   ├── pass_generator.py           # Digital Exam Entry Pass & printable HTML receipt generator
 │   └── import_service.py           # Bulk photo import with CSV mapping & diagnostics
 │
 ├── ui/
 │   ├── styles.py                   # TTK design theme, colors, fonts, and card styling
 │   ├── dashboard.py                # Main analytics dashboard & quick action tiles
-│   ├── registration.py             # Manual registration screen with live camera preview
-│   ├── authentication.py           # Exam authentication screen with verdict card
-│   ├── students.py                 # Student roster table & confirmed deletion
-│   ├── attendance.py               # Attendance records log with date filtering
+│   ├── registration.py             # Manual registration screen with quality feedback
+│   ├── authentication.py           # Exam authentication screen with pass modal & liveness
+│   ├── sessions.py                 # Exam session & hall seating allocation screen
+│   ├── audit_logs.py               # Security & biometric verification audit inspector
+│   ├── students.py                 # Student roster table & profile history modal
+│   ├── attendance.py               # Attendance records log with date/session filtering
 │   └── import_photos.py            # Bulk photo & CSV import UI with report
 │
 ├── data/
 │   ├── exam_auth.db                # SQLite database (auto-created)
+
 │   └── sample_import/              # Verified sample test photos & CSV mapping
 │
 └── tests/

@@ -32,6 +32,8 @@ from ui.authentication import AuthenticationView
 from ui.students import StudentsView
 from ui.attendance import AttendanceView
 from ui.import_photos import ImportPhotosView
+from ui.sessions import SessionsView
+from ui.audit_logs import AuditLogsView
 
 logger = logging.getLogger("ExamAuth.Main")
 
@@ -41,7 +43,7 @@ class ExamAuthApplication:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title(f"{config.APP_TITLE} — Academic Prototype")
+        self.root.title(f"{config.APP_TITLE} — Biometric Examination System")
         self.root.geometry(config.APP_WINDOW_SIZE)
         self.root.minsize(*config.APP_MIN_SIZE)
 
@@ -133,6 +135,23 @@ class ExamAuthApplication:
             navigate_callback=self.show_view
         )
         self.views["import_photos"].grid(row=0, column=0, sticky="nsew")
+
+        # 7. Exam Sessions View
+        self.views["sessions"] = SessionsView(
+            parent=self.container,
+            db=self.db,
+            navigate_callback=self.show_view
+        )
+        self.views["sessions"].grid(row=0, column=0, sticky="nsew")
+
+        # 8. Security Audit Logs View
+        self.views["audit_logs"] = AuditLogsView(
+            parent=self.container,
+            db=self.db,
+            navigate_callback=self.show_view
+        )
+        self.views["audit_logs"].grid(row=0, column=0, sticky="nsew")
+
 
     def show_view(self, view_name: str) -> None:
         """Switch active screen, managing on_hide and on_show lifecycles."""

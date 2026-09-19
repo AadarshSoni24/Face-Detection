@@ -188,6 +188,79 @@ class Database:
             return deleted
 
     # ---------------------------------------------------------
+    # Exam Session Operations
+    # ---------------------------------------------------------
+    def create_exam_session(
+        self,
+        session_code: str,
+        course_name: str,
+        exam_title: str,
+        hall_number: str,
+        exam_date: str,
+        start_time: str,
+        end_time: str,
+        status: str = "ACTIVE"
+    ) -> int:
+        """Create a new exam session."""
+        session_code = session_code.strip().upper()
+        course_name = course_name.strip()
+        exam_title = exam_title.strip()
+        hall_number = hall_number.strip()
+        exam_date = exam_date.strip()
+        start_time = start_time.strip()
+        end_time = end_time.strip()
+
+        query = """
+            INSERT INTO exam_sessions (session_code, course_name, exam_title, hall_number, exam_date, start_time, end_time, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (session_code, course_name, exam_title, hall_number, exam_date, start_time, end_time, status))
+            sid = cursor.lastrowid
+            logger.info(f"Created Exam Session id={sid}, code='{session_code}', title='{exam_title}'")
+            return sid
+
+    def get_all_sessions(self, search_query: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve all exam sessions, optionally filtered."""
+        query = "SELECT * FROM exam_sessions WHERE 1=1"
+        params = []
+        if search_query and search_query.strip():
+            term = f"%{search_query.strip()}%"
+            query += " AND (session_code LIKE ? OR course_name LIKE ? OR exam_title LIKE ? OR hall_number LIKE ?)"
+            params.extend([term, term, term, term])
+        query += " ORDER BY exam_date DESC, start_time DESC;"
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_active_sessions(self) -> List[Dict[str, Any]]:
+        """Retrieve currently active exam sessions."""
+        query = "SELECT * FROM exam_sessions WHERE status = 'ACTIVE' ORDER BY exam_date DESC, start_time ASC;"
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_session_by_id(self, session_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieve session details by ID."""
+        query = "SELECT * FROM exam_sessions WHERE id = ?;"
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (session_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def delete_session(self, session_id: int) -> bool:
+        """Delete an exam session."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM exam_sessions WHERE id = ?;", (session_id,))
+            return cursor.rowcount > 0
+
+    # ---------------------------------------------------------
     # Attendance Operations
     # ---------------------------------------------------------
     def mark_attendance(
@@ -196,7 +269,9 @@ class Database:
         roll_number: str,
         date_str: Optional[str] = None,
         time_str: Optional[str] = None,
-        status: str = "PRESENT"
+        status: str = "PRESENT",
+        session_id: Optional[int] = None,
+        pass_code: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Mark attendance for a student on date_str (default: today YYYY-MM-DD).
@@ -209,10 +284,10 @@ class Database:
         roll_number = roll_number.strip().upper()
 
         # Check existing attendance
-        check_query = "SELECT id FROM attendance WHERE student_id = ? AND date = ?;"
+        check_query = "SELECT id, pass_code FROM attendance WHERE student_id = ? AND date = ?;"
         insert_query = """
-            INSERT INTO attendance (student_id, roll_number, date, time, status)
-            VALUES (?, ?, ?, ?, ?);
+            INSERT INTO attendance (student_id, roll_number, session_id, date, time, status, pass_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -224,9 +299,9 @@ class Database:
                 return False, msg
 
             try:
-                cursor.execute(insert_query, (student_id, roll_number, date_str, time_str, status))
+                cursor.execute(insert_query, (student_id, roll_number, session_id, date_str, time_str, status, pass_code))
                 msg = "Attendance Marked Successfully"
-                logger.info(f"Marked attendance: {roll_number} on {date_str} at {time_str}")
+                logger.info(f"Marked attendance: {roll_number} on {date_str} at {time_str} (Pass: {pass_code})")
                 return True, msg
             except sqlite3.IntegrityError:
                 return False, f"Duplicate attendance constraint for {roll_number} on {date_str}."
@@ -234,26 +309,33 @@ class Database:
     def get_attendance_records(
         self,
         date_str: Optional[str] = None,
-        search_query: Optional[str] = None
+        search_query: Optional[str] = None,
+        session_id: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Retrieve attendance records joined with student details.
-        Optionally filter by date and student roll/name.
+        Retrieve attendance records joined with student details and exam session details.
+        Optionally filter by date, student roll/name, or session ID.
         """
         query = """
-            SELECT a.id, a.student_id, a.roll_number, s.name, s.course, a.date, a.time, a.status
+            SELECT a.id, a.student_id, a.roll_number, s.name, s.course,
+                   a.session_id, es.session_code, es.exam_title, es.hall_number,
+                   a.date, a.time, a.status, a.pass_code
             FROM attendance a
             JOIN students s ON a.student_id = s.id
+            LEFT JOIN exam_sessions es ON a.session_id = es.id
             WHERE 1=1
         """
         params = []
         if date_str and date_str.strip():
             query += " AND a.date = ?"
             params.append(date_str.strip())
+        if session_id:
+            query += " AND a.session_id = ?"
+            params.append(session_id)
         if search_query and search_query.strip():
             term = f"%{search_query.strip()}%"
-            query += " AND (a.roll_number LIKE ? OR s.name LIKE ?)"
-            params.extend([term, term])
+            query += " AND (a.roll_number LIKE ? OR s.name LIKE ? OR a.pass_code LIKE ?)"
+            params.extend([term, term, term])
         query += " ORDER BY a.date DESC, a.time DESC;"
 
         with self.get_connection() as conn:
@@ -270,6 +352,20 @@ class Database:
             cursor.execute(query, (student_id, today))
             return cursor.fetchone() is not None
 
+    def get_student_attendance_history(self, student_id: int) -> List[Dict[str, Any]]:
+        """Fetch attendance history for a single student."""
+        query = """
+            SELECT a.id, a.date, a.time, a.status, a.pass_code, es.session_code, es.exam_title, es.hall_number
+            FROM attendance a
+            LEFT JOIN exam_sessions es ON a.session_id = es.id
+            WHERE a.student_id = ?
+            ORDER BY a.date DESC, a.time DESC;
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, (student_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
     # ---------------------------------------------------------
     # Authentication Logs & Statistics
     # ---------------------------------------------------------
@@ -279,17 +375,65 @@ class Database:
         roll_number: str,
         result: str,
         similarity_score: Optional[float] = None,
-        details: str = ""
+        details: str = "",
+        session_id: Optional[int] = None,
+        liveness_score: Optional[float] = None
     ) -> int:
         """Log an authentication attempt for audit and security tracking."""
         query = """
-            INSERT INTO authentication_logs (student_id, roll_number, result, similarity_score, details)
-            VALUES (?, ?, ?, ?, ?);
+            INSERT INTO authentication_logs (student_id, roll_number, session_id, result, similarity_score, liveness_score, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(query, (student_id, roll_number.strip().upper(), result, similarity_score, details))
+            cursor.execute(query, (student_id, roll_number.strip().upper(), session_id, result, similarity_score, liveness_score, details))
             return cursor.lastrowid
+
+    def get_audit_logs(
+        self,
+        filter_result: Optional[str] = None,
+        search_query: Optional[str] = None,
+        date_str: Optional[str] = None,
+        limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """Retrieve authentication audit logs with optional filters."""
+        query = """
+            SELECT al.id, al.student_id, al.roll_number, s.name AS student_name,
+                   al.session_id, es.session_code, es.exam_title,
+                   al.timestamp, al.result, al.similarity_score, al.liveness_score, al.details
+            FROM authentication_logs al
+            LEFT JOIN students s ON al.student_id = s.id
+            LEFT JOIN exam_sessions es ON al.session_id = es.id
+            WHERE 1=1
+        """
+        params = []
+        if filter_result and filter_result != "ALL":
+            if filter_result == "FAILED_ONLY":
+                query += " AND al.result NOT IN ('SUCCESS')"
+            elif filter_result == "SUCCESS_ONLY":
+                query += " AND al.result = 'SUCCESS'"
+            elif filter_result == "SPOOF_ONLY":
+                query += " AND al.result LIKE '%SPOOF%'"
+            else:
+                query += " AND al.result = ?"
+                params.append(filter_result)
+
+        if date_str and date_str.strip():
+            query += " AND DATE(al.timestamp) = ?"
+            params.append(date_str.strip())
+
+        if search_query and search_query.strip():
+            term = f"%{search_query.strip()}%"
+            query += " AND (al.roll_number LIKE ? OR s.name LIKE ? OR al.details LIKE ?)"
+            params.extend([term, term, term])
+
+        query += " ORDER BY al.timestamp DESC LIMIT ?;"
+        params.append(limit)
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_dashboard_stats(self) -> Dict[str, int]:
         """Fetch summary metrics for the main dashboard display."""
@@ -299,6 +443,7 @@ class Database:
             "attendance_today": 0,
             "failed_auth_today": 0,
             "total_auth_today": 0,
+            "active_sessions": 0,
         }
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -327,4 +472,9 @@ class Database:
             )
             stats["total_auth_today"] = cursor.fetchone()["c"]
 
+            # Active exam sessions
+            cursor.execute("SELECT COUNT(*) AS c FROM exam_sessions WHERE status = 'ACTIVE';")
+            stats["active_sessions"] = cursor.fetchone()["c"]
+
         return stats
+

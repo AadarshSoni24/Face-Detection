@@ -6,6 +6,7 @@ from .registration_service import RegistrationService, RegistrationResult
 from .authentication_service import AuthenticationService, AuthenticationResult
 from .attendance_service import AttendanceService
 from .import_service import ImportService, ImportSummary, ImportItemResult
+from .pass_generator import PassGenerator, ExamPass
 
 __all__ = [
     "RegistrationService",
@@ -15,5 +16,8 @@ __all__ = [
     "AttendanceService",
     "ImportService",
     "ImportSummary",
-    "ImportItemResult"
+    "ImportItemResult",
+    "PassGenerator",
+    "ExamPass"
 ]
+

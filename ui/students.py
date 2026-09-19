@@ -1,7 +1,7 @@
 """
 ui/students.py - Student Records Management Screen.
 
-Provides listing, filtering, searching, and confirmed deletion of registered students.
+Provides listing, filtering, searching, profile inspection, and confirmed deletion of registered students.
 Never exposes raw biometric feature embeddings in the visual interface.
 """
 
@@ -14,7 +14,7 @@ from ui.styles import FONT_SUBHEADER, FONT_BODY, FONT_SMALL, FONT_HEADER, FONT_B
 
 
 class StudentsView(ttk.Frame):
-    """Student management screen with searchable tabular view."""
+    """Student management screen with searchable tabular view and profile inspector."""
 
     def __init__(self, parent: tk.Widget, db: Database, navigate_callback: Callable[[str], None]):
         super().__init__(parent, style="App.TFrame")
@@ -61,12 +61,13 @@ class StudentsView(ttk.Frame):
         ctrl_inner.pack(fill="x")
 
         tk.Label(ctrl_inner, text="Search Students:", font=FONT_BODY_BOLD, bg=config.COLOR_CARD_BG).pack(side="left", padx=(0, 8))
-        self.entry_search = ttk.Entry(ctrl_inner, width=28, style="App.TEntry")
+        self.entry_search = ttk.Entry(ctrl_inner, width=24, style="App.TEntry")
         self.entry_search.pack(side="left", padx=(0, 8))
         self.entry_search.bind("<KeyRelease>", lambda e: self.refresh_table())
 
         ttk.Button(ctrl_inner, text="🔍 Search", style="Primary.TButton", command=self.refresh_table).pack(side="left", padx=4)
         ttk.Button(ctrl_inner, text="🔄 Refresh", style="Secondary.TButton", command=self._on_clear_search).pack(side="left", padx=4)
+        ttk.Button(ctrl_inner, text="👁️ View Profile & History", style="Secondary.TButton", command=self._on_view_profile).pack(side="left", padx=8)
 
         # Delete Button & Counter on Right
         ttk.Button(ctrl_inner, text="🗑 Delete Selected", style="Danger.TButton", command=self._on_delete_clicked).pack(side="right", padx=(8, 0))
@@ -97,6 +98,9 @@ class StudentsView(ttk.Frame):
         self.tree.column("reg_type", width=140, anchor="center")
         self.tree.column("created_at", width=180, anchor="center")
 
+        # Double click to view profile
+        self.tree.bind("<Double-1>", lambda e: self._on_view_profile())
+
         # Scrollbar
         scrollbar = ttk.Scrollbar(table_card, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -115,7 +119,6 @@ class StudentsView(ttk.Frame):
 
     def refresh_table(self) -> None:
         """Fetch records from SQLite and populate the treeview."""
-        # Clear existing rows
         for row in self.tree.get_children():
             self.tree.delete(row)
 
@@ -138,6 +141,107 @@ class StudentsView(ttk.Frame):
             )
 
         self.lbl_count.config(text=f"Total: {len(students)} students")
+
+    def _on_view_profile(self) -> None:
+        """Open detailed profile modal for selected student."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Select Student", "Please select a student to view profile.", parent=self)
+            return
+
+        sid = int(selected[0])
+        student = self.db.get_student_by_id(sid)
+        if not student:
+            return
+
+        history = self.db.get_student_attendance_history(sid)
+        encodings = self.db.get_student_encodings(sid)
+
+        # Modal Window
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Student Profile — {student['name']} ({student['roll_number']})")
+        dlg.geometry("620x540")
+        dlg.minsize(560, 480)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        # Header
+        hdr = tk.Frame(dlg, bg=config.COLOR_HEADER_BG, height=60)
+        hdr.pack(fill="x", side="top")
+        hdr.pack_propagate(False)
+
+        tk.Label(
+            hdr,
+            text=f"Student Profile: {student['name']}",
+            font=FONT_HEADER,
+            fg="#FFFFFF",
+            bg=config.COLOR_HEADER_BG
+        ).pack(side="left", padx=20, pady=16)
+
+        body = tk.Frame(dlg, bg=config.COLOR_BG, padx=20, pady=16)
+        body.pack(fill="both", expand=True)
+
+        # Profile Details Card
+        info_card = tk.Frame(body, bg=config.COLOR_CARD_BG, bd=1, relief="solid", padx=16, pady=12)
+        info_card.config(highlightbackground=config.COLOR_BORDER)
+        info_card.pack(fill="x", pady=(0, 12))
+
+        fields = [
+            ("Roll Number:", student["roll_number"]),
+            ("Full Name:", student["name"]),
+            ("Course / Department:", student.get("course") or "General / Unassigned"),
+            ("Enrolled Method:", f"{student.get('registration_type', 'WEBCAM')} ({len(encodings)} biometric template{'s' if len(encodings) > 1 else ''})"),
+            ("Enrollment Date:", student.get("created_at") or "—"),
+            ("Total Verified Attendances:", f"{len(history)} exam sessions")
+        ]
+
+        for idx, (lbl, val) in enumerate(fields):
+            row_f = tk.Frame(info_card, bg=config.COLOR_CARD_BG)
+            row_f.pack(fill="x", pady=2)
+            tk.Label(row_f, text=lbl, font=FONT_BODY_BOLD, fg=config.COLOR_TEXT_MUTED, bg=config.COLOR_CARD_BG, width=24, anchor="w").pack(side="left")
+            tk.Label(row_f, text=val, font=FONT_BODY, fg=config.COLOR_TEXT_PRIMARY, bg=config.COLOR_CARD_BG, anchor="w").pack(side="left")
+
+        # Attendance History Table
+        tk.Label(body, text="Verified Examination Attendance History", font=FONT_SUBHEADER, fg=config.COLOR_TEXT_PRIMARY, bg=config.COLOR_BG).pack(anchor="w", pady=(4, 6))
+
+        table_f = tk.Frame(body, bg=config.COLOR_CARD_BG, bd=1, relief="solid")
+        table_f.config(highlightbackground=config.COLOR_BORDER)
+        table_f.pack(fill="both", expand=True, pady=(0, 12))
+
+        cols = ("date", "time", "exam", "hall", "status", "pass")
+        tree_hist = ttk.Treeview(table_f, columns=cols, show="headings", height=5)
+        tree_hist.heading("date", text="Date")
+        tree_hist.heading("time", text="Time")
+        tree_hist.heading("exam", text="Exam Title")
+        tree_hist.heading("hall", text="Hall")
+        tree_hist.heading("status", text="Status")
+        tree_hist.heading("pass", text="Pass Token")
+
+        tree_hist.column("date", width=85, anchor="center")
+        tree_hist.column("time", width=80, anchor="center")
+        tree_hist.column("exam", width=140, anchor="w")
+        tree_hist.column("hall", width=90, anchor="w")
+        tree_hist.column("status", width=70, anchor="center")
+        tree_hist.column("pass", width=110, anchor="center")
+
+        tree_hist.pack(side="left", fill="both", expand=True)
+
+        for h in history:
+            tree_hist.insert(
+                "",
+                "end",
+                values=(
+                    h["date"],
+                    h["time"],
+                    h.get("exam_title") or "General Exam",
+                    h.get("hall_number") or "Main Hall",
+                    h["status"],
+                    h.get("pass_code") or "—"
+                )
+            )
+
+        # Close button
+        ttk.Button(body, text="Close Profile", style="Secondary.TButton", command=dlg.destroy).pack(side="right")
 
     def _on_delete_clicked(self) -> None:
         """Delete selected student with confirmation."""

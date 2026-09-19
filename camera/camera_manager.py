@@ -5,9 +5,10 @@ Handles camera initialization, background frame polling, safe release, error han
 for unavailable devices, and an optional test/file mode for environments without a webcam.
 """
 
+import os
 import threading
 import time
-from typing import Optional, Union
+from typing import Optional, Union, List
 import cv2
 import numpy as np
 import logging
@@ -40,11 +41,35 @@ class CameraManager:
         self.is_virtual_mode = False
         self.virtual_image: Optional[np.ndarray] = None
 
+    @staticmethod
+    def get_available_cameras(max_tested: int = 3) -> List[int]:
+        """Discover available webcam device indices on the system."""
+        available = []
+        for idx in range(max_tested):
+            try:
+                cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
+                if cap.isOpened():
+                    ret, _ = cap.read()
+                    if ret:
+                        available.append(idx)
+                cap.release()
+            except Exception:
+                pass
+        return available if available else [0]
+
+    def switch_camera(self, new_index: int) -> None:
+        """Switch to a different camera device dynamically."""
+        if self.is_running:
+            self.stop()
+        self.camera_index = new_index
+        self.start(camera_index=new_index)
+
     def start(self, camera_index: Optional[int] = None) -> None:
         """
         Open the hardware webcam and begin background frame capture.
         Raises CameraUnavailableError if webcam cannot be opened.
         """
+
         if self.is_running:
             logger.debug("Camera stream is already active.")
             return

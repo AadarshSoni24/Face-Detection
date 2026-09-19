@@ -26,7 +26,9 @@ class AttendanceService:
         student_id: int,
         roll_number: str,
         date_str: Optional[str] = None,
-        time_str: Optional[str] = None
+        time_str: Optional[str] = None,
+        session_id: Optional[int] = None,
+        pass_code: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Record attendance for verified student.
@@ -40,7 +42,9 @@ class AttendanceService:
             roll_number=roll_number,
             date_str=today,
             time_str=now_time,
-            status="PRESENT"
+            status="PRESENT",
+            session_id=session_id,
+            pass_code=pass_code
         )
         return success, message
 
@@ -51,7 +55,9 @@ class AttendanceService:
     def get_attendance_list(
         self,
         date_str: Optional[str] = None,
-        search_query: Optional[str] = None
+        search_query: Optional[str] = None,
+        session_id: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Retrieve attendance records with optional date and name/roll filters."""
-        return self.db.get_attendance_records(date_str=date_str, search_query=search_query)
+        """Retrieve attendance records with optional date, session, and name/roll filters."""
+        return self.db.get_attendance_records(date_str=date_str, search_query=search_query, session_id=session_id)
+
